@@ -15,7 +15,9 @@
 
 using namespace std;
 
-__global__ void firstKernel(unsigned int *input_d, unsigned int *output_d, int maxThreadsX);
+__global__ void firstKernel(unsigned int *input_d, unsigned int *output_d, int maxThreadsX, unsigned int *S);
+__global__ void secondKernel(unsigned int *S, unsigned int size);
+__global__ void thirdKernel(unsigned int *S, unsigned int *output_d, unsigned int size);
 
 #define INPUTSIZE 1000000
 
@@ -49,8 +51,9 @@ int main(void)
     cudaCheckError(cudaSetDevice(device)); //set device to one with max thread capability in x axis
     
     // allocate input & output arrays on device
-    unsigned int *input_d, *output_d;     // pointers to device memory
+    unsigned int *input_d, *S, *output_d;     // pointers to device memory
     cudaCheckError(cudaMalloc((void **) &input_d, sizeof(unsigned int) * INPUTSIZE));
+    cudaCheckError(cudaMalloc((void **) &S, sizeof(unsigned int) * ceil(INPUTSIZE / maxThreadsX)));
     cudaCheckError(cudaMalloc((void **) &output_d, sizeof(unsigned int) * INPUTSIZE));
     
     // send input_h from host to device
@@ -58,10 +61,17 @@ int main(void)
 
     dim3 blockSize(maxThreadsX, 1);
     dim3 gridSize(ceil(INPUTSIZE / maxThreadsX),1);
+    firstKernel<<<gridSize, blockSize, 2*maxThreadsX*sizeof(unsigned int)>>>(input_d, output_d, maxThreadsX, S);
+    cudaCheckKernel();
 
-    //call segmented parallel scan kernels
-    firstKernel<<<gridSize, blockSize, 2*maxThreadsX*sizeof(unsigned int)>>>(input_d, output_d, maxThreadsX);
+    dim3 blockSize(maxThreadsX, 1);
+    dim3 gridSize(1);
+    secondKernel<<<gridSize, blockSize>>>(output_d, INPUTSIZE);
+    cudaCheckKernel();
 
+    dim3 blockSize(maxThreadsX, 1);
+    dim3 gridSize(ceil((INPUTSIZE / maxThreadsX) - 1),1);
+    thirdKernel<<<gridSize, blockSize>>>(S, output_d, INPUTSIZE);
     cudaCheckKernel();
 
     // retrieve output_d from device
@@ -84,7 +94,7 @@ int main(void)
     cudaFree(input_d); cudaFree(output_d);
 }
 
-__global__ void firstKernel(unsigned char *input_d, unsigned char *output_d, int maxThreadsX){
+__global__ void firstKernel(unsigned char *input_d, unsigned char *output_d, int maxThreadsX, unsigned int *S){
 
     extern __shared__ unsigned int buffer[];
     unsigned int *firstBuf = buffer;
@@ -94,7 +104,7 @@ __global__ void firstKernel(unsigned char *input_d, unsigned char *output_d, int
     if(i < INPUTSIZE){
         firstBuf[threadIdx.x] = input_d[i];
     } else{
-        firstBuf[threadIdx.x] = 0.0f;
+        firstBuf[threadIdx.x] = 0;
     }
     unsigned int counter = 0;
     for(unsigned int stride = 1; stride < blockDim.x; stride *= 2){
@@ -111,5 +121,50 @@ __global__ void firstKernel(unsigned char *input_d, unsigned char *output_d, int
         } else {
             output_d[i] = secondBuf[threadIdx.x];
         }
+    }
+    __syncthreads();
+    if(threadIdx.x == blockDim.x - 1){
+        if(counter % 2 == 0){ 
+            S[blockIdx.x] = firstBuf[maxThreadsX - 1];
+        } else {
+            S[blockIdx.x] = secondBuf[maxThreadsX - 1];
+        } 
+    }
+}
+
+__global__ void secondKernel(unsigned int *S, unsigned int size){
+
+    extern __shared__ unsigned int buffer[];
+    unsigned int *firstBuf = buffer;
+    unsigned int *secondBuf = &firstBuf[size];
+
+    unsigned int i = blockIdx.x*blockDim.x + threadIdx.x;
+    if(i < size){
+        firstBuf[threadIdx.x] = S[i];
+    } else{
+        firstBuf[threadIdx.x] = 0;
+    }
+    unsigned int counter = 0;
+    for(unsigned int stride = 1; stride < blockDim.x; stride *= 2){
+        __syncthreads();
+        if(counter % 2 == 0 && threadIdx.x >= stride)
+            secondBuf[threadIdx.x] = firstBuf[threadIdx.x] + firstBuf[threadIdx.x - stride];
+        else if(threadIdx.x >= stride)
+            firstBuf[threadIdx.x] = secondBuf[threadIdx.x] + secondBuf[threadIdx.x - stride];
+        counter += 1;
+    }
+    if(i < size){
+        if(counter % 2 == 0){ 
+            S[i] = firstBuf[threadIdx.x];
+        } else {
+            S[i] = secondBuf[threadIdx.x];
+        }
+    }
+}
+
+__global__ void thirdKernel(unsigned int *S, unsigned int *output_d, unsigned int size){
+    unsigned int i = blockIdx.x*blockDim.x + threadIdx.x;
+    if(i < size){
+        output_d[i + blockDim.x] += S[blockIdx.x];
     }
 }
