@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <cuda.h>
 
 #define cudaCheckError(ans) { gpuAssert((ans), __FILE__, __LINE__); }
@@ -30,4 +31,15 @@ inline void gpuKernelCheck(const char *file, int line)
                 cudaGetErrorString(err), file, line);
         exit(err);
     }
+}
+
+#define mallocCheckError(ans) (cpuMallocAssert((ans), __FILE__, __LINE__))
+inline void* cpuMallocAssert(void* ptr, const char* file, int line, bool abort=true)
+{
+    if (ptr == NULL)
+    {
+        fprintf(stderr, "CPU malloc failed in %s at line %d\n", file, line);
+        if (abort) exit(EXIT_FAILURE);
+    }
+    return ptr;
 }
